@@ -141,4 +141,5 @@ export function useTasks() {
   }, [tasks]);
 
   return { tasks, loading, analytics, setTasks, addTask, updateTask };
+  
 }

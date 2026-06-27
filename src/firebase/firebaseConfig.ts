@@ -1,4 +1,5 @@
 import { initializeApp } from 'firebase/app';
+import { getAnalytics, getAnalytics as loadAnalytics, isSupported, type Analytics } from 'firebase/analytics';
 import { getAuth } from 'firebase/auth';
 import { initializeFirestore } from 'firebase/firestore';
 
@@ -9,6 +10,7 @@ const firebaseConfig = {
   storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
 };
 
 const missingFirebaseEnvVars = Object.entries({
@@ -27,8 +29,17 @@ if (missingFirebaseEnvVars.length > 0) {
 }
 
 const app = initializeApp(firebaseConfig);
+
 export const auth = getAuth(app);
 export const firestore = initializeFirestore(app, {
   experimentalForceLongPolling: true,
   ignoreUndefinedProperties: true,
 });
+export const analyticsPromise: Promise<Analytics | null> =
+  typeof window === 'undefined' || !firebaseConfig.measurementId
+    ? Promise.resolve(null)
+    : isSupported()
+        .then((supported) => (supported ? loadAnalytics(app) : null))
+        .catch(() => null);
+
+export { app, firebaseConfig, getAnalytics };

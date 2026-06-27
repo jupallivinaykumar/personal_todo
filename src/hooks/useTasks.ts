@@ -1,7 +1,30 @@
-import { useEffect, useMemo, useState } from 'react';
-import { useAuth } from '../context/AuthContext';
-import { createTask, fetchUserTasks, updateTask as updateTaskService } from '../services/taskService';
-import type { Task } from '../types/task';
+/**
+ * useTasks Hook
+ *
+ * Responsibilities:
+ * - Fetch user tasks from Firebase Firestore.
+ * - Cache tasks in browser localStorage.
+ * - Restore cached tasks after page refresh.
+ * - Keep Firebase and localStorage synchronized.
+ * - Support optimistic add/update operations.
+ * - Calculate task analytics.
+ *
+ * Task Persistence:
+ * After a user logs in and adds tasks, the tasks are stored in
+ * Firebase Firestore and cached in browser localStorage.
+ * Refreshing the page does not remove the tasks.
+ * Cached tasks are loaded immediately, while the latest data
+ * is synchronized from Firebase in the background.
+ */
+
+import { useEffect, useMemo, useState } from "react";
+import { useAuth } from "../context/AuthContext";
+import {
+  createTask,
+  fetchUserTasks,
+  updateTask as updateTaskService,
+} from "../services/taskService";
+import type { Task } from "../types/task";
 
 interface Analytics {
   todayCount: number;
@@ -12,37 +35,39 @@ interface Analytics {
   dailySummary: string;
 }
 
-function getTaskCacheKey(userId: string) {
-  return `smart-notify-tasks:${userId}`;
-}
+/* ------------------------- Local Storage Helpers ------------------------- */
 
-function readCachedTasks(userId: string) {
-  if (typeof window === 'undefined') return [];
+const getCacheKey = (userId: string) => `smart-notify-tasks:${userId}`;
+
+const readCachedTasks = (userId: string): Task[] => {
+  if (typeof window === "undefined") return [];
 
   try {
-    const raw = window.localStorage.getItem(getTaskCacheKey(userId));
-    return raw ? (JSON.parse(raw) as Task[]) : [];
-  } catch (error) {
-    console.error('Failed to read cached tasks:', error);
+    const data = localStorage.getItem(getCacheKey(userId));
+    return data ? JSON.parse(data) : [];
+  } catch {
     return [];
   }
-}
+};
 
-function writeCachedTasks(userId: string, tasks: Task[]) {
-  if (typeof window === 'undefined') return;
+const saveCachedTasks = (userId: string, tasks: Task[]) => {
+  if (typeof window === "undefined") return;
 
-  try {
-    window.localStorage.setItem(getTaskCacheKey(userId), JSON.stringify(tasks));
-  } catch (error) {
-    console.error('Failed to cache tasks:', error);
-  }
-}
+  localStorage.setItem(getCacheKey(userId), JSON.stringify(tasks));
+};
+
+/* ------------------------------ Custom Hook ------------------------------ */
 
 export function useTasks() {
   const { user } = useAuth();
+
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
 
+  /**
+   * Load cached tasks first.
+   * Then synchronize with Firebase.
+   */
   useEffect(() => {
     if (!user) {
       setTasks([]);
@@ -51,29 +76,38 @@ export function useTasks() {
     }
 
     setLoading(true);
-    const cachedTasks = readCachedTasks(user.uid);
 
-    if (cachedTasks.length > 0) {
-      setTasks(cachedTasks);
+    const cached = readCachedTasks(user.uid);
+
+    if (cached.length) {
+      setTasks(cached);
     }
 
     fetchUserTasks(user.uid)
-      .then((fetchedTasks) => {
-        setTasks(fetchedTasks);
-        writeCachedTasks(user.uid, fetchedTasks);
+      .then((firebaseTasks) => {
+        setTasks(firebaseTasks);
+        saveCachedTasks(user.uid, firebaseTasks);
       })
-      .catch((error) => {
-        console.error('Failed to fetch user tasks:', error);
-      })
+      .catch(console.error)
       .finally(() => setLoading(false));
   }, [user]);
 
+  /**
+   * Keep localStorage synchronized.
+   */
   useEffect(() => {
     if (!user) return;
-    writeCachedTasks(user.uid, tasks);
+
+    saveCachedTasks(user.uid, tasks);
   }, [tasks, user]);
 
-  const addTask = async (taskData: Omit<Task, 'id' | 'createdAt' | 'updatedAt'>) => {
+  /**
+   * Add Task
+   * Uses Optimistic UI.
+   */
+  const addTask = async (
+    taskData: Omit<Task, "id" | "createdAt" | "updatedAt">
+  ) => {
     if (!user) return;
 
     const optimisticTask: Task = {
@@ -84,27 +118,47 @@ export function useTasks() {
       updatedAt: new Date().toISOString(),
     } as Task;
 
-    setTasks((prevTasks) => [optimisticTask, ...prevTasks]);
-
+    setTasks((prev) => [optimisticTask, ...prev]);
     try {
-      const savedTask = await createTask({ ...taskData, ownerId: user.uid });
-      setTasks((prevTasks) =>
-        prevTasks.map((task) => (task.id === optimisticTask.id ? savedTask : task))
+      const savedTask = await createTask({
+        ...taskData,
+        ownerId: user.uid,
+      });
+
+      setTasks((prev) =>
+        prev.map((task) =>
+          task.id === optimisticTask.id ? savedTask : task
+        )
       );
+
       return savedTask;
     } catch (error) {
-      setTasks((prevTasks) => prevTasks.filter((task) => task.id !== optimisticTask.id));
+      setTasks((prev) =>
+        prev.filter((task) => task.id !== optimisticTask.id)
+      );
+
       throw error;
     }
   };
 
-  const updateTask = async (taskId: string, patch: Partial<Task>) => {
+  /**
+   * Update Task
+   */
+  const updateTask = async (
+    taskId: string,
+    patch: Partial<Task>
+  ) => {
     const previousTasks = tasks;
-    const updatedAt = new Date().toISOString();
 
-    setTasks((prevTasks) =>
-      prevTasks.map((task) =>
-        task.id === taskId ? { ...task, ...patch, updatedAt } : task
+    setTasks((prev) =>
+      prev.map((task) =>
+        task.id === taskId
+          ? {
+              ...task,
+              ...patch,
+              updatedAt: new Date().toISOString(),
+            }
+          : task
       )
     );
 
@@ -116,30 +170,44 @@ export function useTasks() {
     }
   };
 
+  /**
+   * Dashboard Analytics
+   */
   const analytics = useMemo<Analytics>(() => {
     const today = new Date().toISOString().slice(0, 10);
 
-    const normalizeStatus = (status: string | undefined) => String(status ?? '').trim().toLowerCase();
-    const isCompletedStatus = (status: string) => ['completed', 'complete', 'done'].includes(normalizeStatus(status));
-    const isMissedStatus = (status: string) => normalizeStatus(status) === 'missed';
-    const isActiveTask = (task: Task) => !isCompletedStatus(task.status) && !isMissedStatus(task.status);
+    const completed = tasks.filter(
+      (task) => task.status?.toLowerCase() === "completed"
+    );
 
-    const todayTasks = tasks.filter((task) => isActiveTask(task) && task.dueDate <= today);
-    const upcoming = tasks.filter((task) => isActiveTask(task) && task.dueDate > today);
-    const missed = tasks.filter((task) => isMissedStatus(task.status));
-    const completed = tasks.filter((task) => isCompletedStatus(task.status));
-    const productivityScore = tasks.length ? Math.round((completed.length / tasks.length) * 100) : 0;
+    const missed = tasks.filter(
+      (task) => task.status?.toLowerCase() === "missed"
+    );
+
+    const active = tasks.filter(
+      (task) =>
+        task.status?.toLowerCase() !== "completed" &&
+        task.status?.toLowerCase() !== "missed"
+    );
 
     return {
-      todayCount: todayTasks.length,
-      upcomingCount: upcoming.length,
+      todayCount: active.filter((t) => t.dueDate <= today).length,
+      upcomingCount: active.filter((t) => t.dueDate > today).length,
       missedCount: missed.length,
       completedCount: completed.length,
-      productivityScore,
+      productivityScore: tasks.length
+        ? Math.round((completed.length / tasks.length) * 100)
+        : 0,
       dailySummary: `You completed ${completed.length} tasks this week.`,
     };
   }, [tasks]);
 
-  return { tasks, loading, analytics, setTasks, addTask, updateTask };
-  
+  return {
+    tasks,
+    loading,
+    analytics,
+    setTasks,
+    addTask,
+    updateTask,
+  };
 }

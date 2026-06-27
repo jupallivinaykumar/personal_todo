@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { createTask, fetchUserTasks, updateTask as updateTaskService } from '../services/taskService';
 import type { Task } from '../types/task';
@@ -12,19 +12,66 @@ interface Analytics {
   dailySummary: string;
 }
 
+function getTaskCacheKey(userId: string) {
+  return `smart-notify-tasks:${userId}`;
+}
+
+function readCachedTasks(userId: string) {
+  if (typeof window === 'undefined') return [];
+
+  try {
+    const raw = window.localStorage.getItem(getTaskCacheKey(userId));
+    return raw ? (JSON.parse(raw) as Task[]) : [];
+  } catch (error) {
+    console.error('Failed to read cached tasks:', error);
+    return [];
+  }
+}
+
+function writeCachedTasks(userId: string, tasks: Task[]) {
+  if (typeof window === 'undefined') return;
+
+  try {
+    window.localStorage.setItem(getTaskCacheKey(userId), JSON.stringify(tasks));
+  } catch (error) {
+    console.error('Failed to cache tasks:', error);
+  }
+}
+
 export function useTasks() {
   const { user } = useAuth();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user) {
+      setTasks([]);
+      setLoading(false);
+      return;
+    }
 
     setLoading(true);
+    const cachedTasks = readCachedTasks(user.uid);
+
+    if (cachedTasks.length > 0) {
+      setTasks(cachedTasks);
+    }
+
     fetchUserTasks(user.uid)
-      .then(setTasks)
+      .then((fetchedTasks) => {
+        setTasks(fetchedTasks);
+        writeCachedTasks(user.uid, fetchedTasks);
+      })
+      .catch((error) => {
+        console.error('Failed to fetch user tasks:', error);
+      })
       .finally(() => setLoading(false));
   }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    writeCachedTasks(user.uid, tasks);
+  }, [tasks, user]);
 
   const addTask = async (taskData: Omit<Task, 'id' | 'createdAt' | 'updatedAt'>) => {
     if (!user) return;
